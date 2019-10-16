@@ -2,6 +2,7 @@
 extern crate vst;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use vst::plugin::*;
 use vst::buffer::AudioBuffer;
@@ -13,7 +14,8 @@ struct FDNReverbParameters {
     drywet: AtomicFloat,
     absorbtion: AtomicFloat,
     decay: AtomicFloat,
-    size: AtomicFloat
+    size: AtomicFloat,
+    invalidated: AtomicBool,
 }
 
 impl Default for FDNReverbParameters {
@@ -22,29 +24,9 @@ impl Default for FDNReverbParameters {
             absorbtion: AtomicFloat::new(0.5),
             decay: AtomicFloat::new(0.5),
             size: AtomicFloat::new(0.3),
-            drywet: AtomicFloat::new(0.4)
+            drywet: AtomicFloat::new(0.4),
+            invalidated: AtomicBool::new(true)
         }
-    }
-}
-
-impl FDNReverbParameters {
-    fn get_absorbtion(&self) -> f32 {
-        self.absorbtion.get()
-    }
-    fn get_decay(&self) -> f32 {
-        self.decay.get()
-    }
-    fn get_size(&self) -> f32 {
-        self.size.get()
-    }
-    fn set_absorbtion(&self, absorbtion: f32) {
-        self.absorbtion.set(absorbtion);
-    }
-    fn set_decay(&self, decay: f32) {
-        self.decay.set(decay);
-    }
-    fn set_size(&self, size_m: f32) {
-        self.decay.set(size_m);
     }
 }
 
@@ -52,25 +34,26 @@ impl PluginParameters for FDNReverbParameters{
     fn get_parameter(&self, index: i32) -> f32 {
         match index {
             0 => self.drywet.get(),
-            1 => self.get_absorbtion(),
-            2 => self.get_decay(),
-            3 => self.get_size(),
+            1 => self.absorbtion.get(),
+            2 => self.decay.get(),
+            3 => self.size.get(),
             _ => 0.0,
         }
     }
     fn set_parameter(&self, index: i32, value: f32) {
+        self.invalidated.store(true, std::sync::atomic::Ordering::Release);
         match index {
             0 => self.drywet.set(value),
-            1 => self.set_absorbtion(value),
-            2 => self.set_decay(value),
-            3 => self.set_size(value),
+            1 => self.absorbtion.set(value),
+            2 => self.decay.set(value),
+            3 => self.size.set(value),
             _ => (),
         }
     }
 
     fn get_parameter_name(&self, index: i32) -> String {
         match index {
-            0 => "drywet".to_string(),
+            0 => "dry/wet".to_string(),
             1 => "absorbtion".to_string(),
             2 => "decay".to_string(),
             3 => "size".to_string(),
@@ -79,7 +62,7 @@ impl PluginParameters for FDNReverbParameters{
     }
     fn get_parameter_label(&self, index: i32) -> String {
         match index {
-            0 => "".to_string(),
+            0 => "%".to_string(),
             1 => "".to_string(),
             2 => "s".to_string(),
             3 => "m".to_string(),
@@ -88,11 +71,11 @@ impl PluginParameters for FDNReverbParameters{
     }
     fn get_parameter_text(&self, index: i32) -> String {
         match index {
-            0 => format!("{:.2}", self.drywet.get()),
-            1 => format!("{:.0}", self.get_absorbtion()),
-            2 => format!("{:.2}", self.get_decay()),
-            3 => format!("{:.3}", self.get_size()),
-            _ => format!(""),
+            0 => format!("{}", self.drywet.get() * 100.),
+            1 => format!("{}", self.absorbtion.get()),
+            2 => format!("{}", self.decay.get()),
+            3 => format!("{}", self.size.get()),
+            _ => format!("!?"),
         }
     }
 }
@@ -102,7 +85,7 @@ struct FDNReverbPlugin {
     sample_rate: f32,
     verb: FDNReverb,
     host_cb: HostCallback,
-    params: Arc<FDNReverbParameters>
+    params: Arc<FDNReverbParameters>,
 }
 
 
@@ -122,6 +105,7 @@ impl Plugin for FDNReverbPlugin {
             inputs: 1,
             outputs: 1,
             // Set our category
+            parameters: 4,
             category: Category::Effect,
             ..Default::default()
         }
@@ -135,15 +119,19 @@ impl Plugin for FDNReverbPlugin {
     fn process(&mut self, buffer: &mut AudioBuffer<f32>) {
         let (input_buffer, mut output_buffer) = buffer.split();
 
-        let abs = self.params.get_absorbtion();
-        let drywet = self.params.drywet.get();
-        let size = self.params.get_size() * 10.;
-        let decay = self.params.get_decay();
+        if self.params.invalidated.load(std::sync::atomic::Ordering::Acquire) {
+            let abs = self.params.absorbtion.get();
+            let drywet = self.params.drywet.get();
+            let size = self.params.size.get();
+            let decay = self.params.decay.get();
 
-        self.verb.set_absorbtion(abs);
-        self.verb.set_drywet(drywet);
-        self.verb.set_size(size);
-        self.verb.set_decay(decay);
+            self.verb.set_absorbtion(abs);
+            self.verb.set_drywet(drywet);
+            self.verb.set_size(size * 100.);
+            self.verb.set_decay(decay);
+
+            self.params.invalidated.store(false, std::sync::atomic::Ordering::Release);
+        }
 
         for (input_channel, output_channel) in input_buffer.into_iter().zip(output_buffer.into_iter()) {
             self.verb.process(input_channel, output_channel);
